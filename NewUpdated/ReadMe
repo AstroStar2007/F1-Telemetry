@@ -1,0 +1,88 @@
+# F1 Telemetry: downforce, drag and L/D from public data
+
+F1 teams never publish aero numbers. This tool estimates them from public FastF1 telemetry alone (speed, throttle, position and elevation). From a single qualifying lap it gives the car's **downforce area (C<sub>L</sub>A)**, **drag area (C<sub>D</sub>A)**, **wheel power**, the **drag DRS removes** and the **lift-to-drag ratio L/D**. It then compares wing levels across circuits. A Streamlit app also compares two drivers' laps: speed traces aligned by distance, sector and corner-speed deltas, g-forces and DRS use.
+
+
+## Run it
+Needs Python 3.10 or newer and an internet connection the first time each session is loaded. FastF1 caches downloads in its own folder, so later runs are fast.
+
+```
+cd F1-Telemetry
+pip install -r requirements.txt
+python -m pytest -q tests                                             # 11 checks, no internet needed
+python aero_report.py --year 2024 --gp Silverstone --session Q        # one lap: downforce, drag, L/D
+python aero_compare.py --year 2024 --events Monza Silverstone Hungary # aero map across circuits
+streamlit run app.py                                                  # interactive driver comparison
+```
+
+`aero_report.py` uses the session's fastest lap unless you add `--driver NOR` (any 3-letter code). Both scripts save their figures and CSVs in `figures/`.
+
+| File | What it does |
+| --- | --- |
+| `aero_analysis.py` | All the physics: resampling, filtering, g-forces, corner detection, downforce, drag and L/D fits |
+| `aero_report.py` | One qualifying lap → 4 figures and `aero_results.csv` |
+| `aero_compare.py` | Top laps at up to 3 circuits → `aero_map.png` and `aero_compare.csv` |
+| `app.py` | Streamlit app: two-driver comparison plus the aero estimates |
+| `tests/` | Simulated laps with a known car, the checks, and `validate.py` (accuracy table) |
+
+## The physics
+
+**Downforce, from the corners.** At the grip limit, lateral force = μ × (weight + downforce), and downforce = ½ρv²C<sub>L</sub>A:
+
+```
+lateral g = μ + (μ ρ ClA / 2 m g) · v²
+```
+
+Plotting apex lateral g against v² over every corner gives a straight line. Slow corners fix the tyre grip μ (the intercept), and fast corners fix C<sub>L</sub>A (the slope). Corner radius comes from a circle fitted to the filtered racing line. Corners taken flat out are left out, because the car may not be at its grip limit there.
+
+**Drag, from the straights.** At full throttle, power goes into drag, rolling resistance, climbing and acceleration:
+
+```
+m v (a + Crr g + g sinθ) = P − ½ ρ CdA v³
+```
+
+The left side is measured: acceleration from filtered speed, and slope from the elevation channel. Fitting it against v³ gives wheel power P (intercept) and C<sub>D</sub>A (slope). An extra term measures how much C<sub>D</sub>A falls with DRS open. Only full-throttle, near-straight samples above 220 km/h are used, because below that the car is traction-limited rather than power-limited.
+
+**Battery clipping check.** If the hybrid battery stops deploying near the end of long straights, the power drop looks like extra drag. The fit is repeated below 290 km/h. If the two answers disagree by more than 12%, the lower-speed fit is used and flagged.
+
+**L/D = C<sub>L</sub>A / C<sub>D</sub>A.** Both areas scale with the assumed car mass and air density, so the ratio doesn't depend on either assumption. That makes it the most robust number here. Air density comes from session weather (ρ = p / RT).
+
+**Signal processing.** FastF1 telemetry is unevenly sampled and X/Y/Z are in 1/10 m. Each lap is resampled to an even 10 Hz grid, converted to metres, and low-pass filtered (3rd-order zero-phase Butterworth: speed 2 Hz, position 1 Hz) before anything is differentiated.
+
+## Validation
+The method is tested on **simulated laps with a known car**. The simulated telemetry is sampled unevenly like FastF1, stored in 1/10 m, has hills and has position noise added. Over 21 laps (3 wing levels × 7 noise seeds), `python tests/validate.py` gives:
+
+| Quantity | Mean error | Worst error |
+| --- | --- | --- |
+| Drag area C<sub>D</sub>A | 1.8% | 3.6% |
+| Wheel power | 0.9% | 2.3% |
+| Tyre grip μ | 2.8% | 7.2% |
+| Downforce area C<sub>L</sub>A | 5.4% | 12.8% |
+| L/D | 5.4% | 12.4% |
+| DRS drag saving | 5.0% | 12.6% |
+
+- The aero map puts the three simulated circuits in the right low-to-high downforce order.
+- Deliberate battery clipping is detected and removed. Without the check, C<sub>D</sub>A comes out about 45% too high; with it, within 4%.
+
+`python -m pytest -q tests` runs 11 checks, including both report scripts end to end on a stand-in session.
+
+## Changelog
+**v3:** drag, power, DRS saving, L/D and the multi-circuit aero map. Missing telemetry samples are skipped instead of spreading NaNs. Outputs always go to `figures/` next to the scripts.
+
+**v2:** v1 reported peak lateral g of exactly 8.00 g for every driver (below). That was the clip limit hiding two bugs:
+1. `np.gradient(x, dt)` was passed the time-step array where NumPy expects time coordinates.
+2. FastF1 `X`/`Y`/`Z` are in **1/10 m**, not metres.
+
+Both are fixed. Telemetry is now resampled to an even grid before Butterworth filtering, and nothing is clipped.
+
+
+## Limitations
+- Assumes each detected corner is taken at the grip limit. That's reasonable in qualifying, less so in races.
+- Tyre load sensitivity (grip falls as load rises) is ignored, so C<sub>L</sub>A is probably under-estimated.
+- Slipstream (tow) lowers apparent drag, and a tow on a qualifying lap would bias C<sub>D</sub>A low.
+- Downforce and drag change with ride height, yaw and speed, so these are lap-averaged values.
+- Banking, kerbs and combined braking-plus-cornering are not modelled.
+- Built for 2018–2025 cars. The 2026 cars have movable wings and no DRS, which breaks the fixed-wing assumption.
+
+## Tech
+Python, FastF1, Pandas, NumPy, SciPy (Butterworth filtering, peak detection, least squares), Matplotlib, Streamlit, pytest
