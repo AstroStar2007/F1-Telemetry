@@ -1,0 +1,7 @@
+fastf1>=3.4
+streamlit>=1.50
+pandas
+numpy
+scipy
+matplotlib
+pytest
